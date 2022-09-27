@@ -3,21 +3,31 @@ import torch
 import numpy as np
 from scipy.special import factorial
 import matplotlib.pyplot as plt
-from data_generators import generate_exponential_data, generate_sin_data, generate_cubic_data
+from data_generators import (
+    generate_exponential_data,
+    generate_sin_data,
+    generate_cubic_data,
+)
 
 
 class KalmanFilter(nn.Module):
-    def __init__(self,
-                 initial_P: torch.Tensor,
-                 degree: int = 3,
-                 batch_size: int = 1,
-                 ):
+    def __init__(
+        self, initial_P: torch.Tensor, degree: int = 3, batch_size: int = 1,
+    ):
         super().__init__()
 
         self.degree = degree
         self.batch_size = batch_size
-        self.state = torch.zeros(degree).float().reshape(1, -1, 1).repeat(batch_size, 1, 1)
-        self.P = torch.eye(degree).float().reshape(1, degree, degree).repeat(batch_size, 1, 1) * 10000000
+        self.state = (
+            torch.zeros(degree).float().reshape(1, -1, 1).repeat(batch_size, 1, 1)
+        )
+        self.P = (
+            torch.eye(degree)
+            .float()
+            .reshape(1, degree, degree)
+            .repeat(batch_size, 1, 1)
+            * 10000000
+        )
         # self.P = initial_P.float().reshape(1, degree, degree).repeat(batch_size, 1, 1)
         # print(self.P)
         self.H = torch.zeros(degree).float().reshape(1, 1, -1).repeat(batch_size, 1, 1)
@@ -26,20 +36,26 @@ class KalmanFilter(nn.Module):
     def Q(self, dt: torch.Tensor):
         F = self.F(dt)
         # print(torch.stack([dt ** 2 / 2, dt ** 3 / 6, dt ** 4 / 24], dim=1).shape)
-        Q = torch.stack([
-            torch.stack([dt ** 4 / 4, dt ** 3 / 2, dt ** 2 / 2], 1),
-            torch.stack([dt ** 3 / 2, dt ** 2, dt], 1),
-            torch.stack([dt ** 2 / 2, dt, torch.ones(len(dt))], 1)
-        ], 2)
-        print(F.shape, Q.shape, torch.transpose(F, 1, 2).shape)
+        Q = torch.stack(
+            [
+                torch.stack([dt ** 4 / 4, dt ** 3 / 2, dt ** 2 / 2], 1),
+                torch.stack([dt ** 3 / 2, dt ** 2, dt], 1),
+                torch.stack([dt ** 2 / 2, dt, torch.ones(len(dt))], 1),
+            ],
+            2,
+        )
+        # print(F.shape, Q.shape, torch.transpose(F, 1, 2).shape)
         Q = F @ Q @ torch.transpose(F, 1, 2)
         return Q
+
     #
     def F(self, dt: torch.Tensor):
         if dt.ndim == 1:
             dt = dt.reshape(-1, 1)
-        F = [torch.pow(dt, torch.arange(self.degree).reshape(1, -1)) / factorial(
-            torch.arange(self.degree).reshape(1, -1))]
+        F = [
+            torch.pow(dt, torch.arange(self.degree).reshape(1, -1))
+            / factorial(torch.arange(self.degree).reshape(1, -1))
+        ]
         for i in range(1, self.degree):
             F.append(torch.roll(F[-1], 1, dims=1))
         F = torch.stack(F, dim=1)
@@ -59,16 +75,22 @@ class KalmanFilter(nn.Module):
         self.x, self.P = self.predict(dt, Q)
         return self.x, self.P
 
-    def update(self, measurement: torch.Tensor, dt: torch.Tensor, R: torch.Tensor, Q: torch.Tensor):
+    def update(
+        self,
+        measurement: torch.Tensor,
+        dt: torch.Tensor,
+        R: torch.Tensor,
+        Q: torch.Tensor,
+    ):
         Q = self.Q(dt) * 0.001
-        R = torch.tensor([[[1000.]]]).float().repeat(self.batch_size, 1, 1)
+        R = torch.tensor([[[1000.0]]]).float().repeat(self.batch_size, 1, 1)
         # R = R.detach()
         x, P = self.predict(dt, Q)
         H_T = torch.transpose(self.H, 1, 2)
         K = P @ H_T @ torch.inverse(self.H @ P @ H_T + R)
-        print(K)
+        # print(K)
         measurement = measurement.reshape(-1, 1, 1)
-        print(x.shape, K.shape, measurement.shape, self.H.shape)
+        # print(x.shape, K.shape, measurement.shape, self.H.shape)
         self.state = x + K @ (measurement - self.H @ x)
         A_ = torch.eye(self.degree).repeat(self.batch_size, 1, 1) - K @ self.H
 
@@ -84,27 +106,38 @@ class DeepKalmanParameters(nn.Module):
         self.degree = degree
         self.encoder = nn.Sequential(nn.Linear(2, hidden_size), nn.ReLU())
         self.gru = nn.GRU(hidden_size, hidden_size, batch_first=True, num_layers=1)
-        self.decoder = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.ReLU(),
-                                     nn.Linear(hidden_size, degree ** 2 + 1))
-        self.register_parameter('initial_P', nn.Parameter(torch.exp(torch.rand(1, degree, degree))))
+        self.decoder = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, degree ** 2 + 1),
+        )
+        self.register_parameter(
+            "initial_P", nn.Parameter(torch.exp(torch.rand(1, degree, degree)))
+        )
 
-    def forward(self, x) -> (torch.Tensor, torch.Tensor):
+    def forward(self, x) -> "(torch.Tensor, torch.Tensor)":
         batch_size, seq_len, _ = x.shape
         x = self.encoder(x)
         x, _ = self.gru(x)
         x = self.decoder(x)
-        Q = torch.exp(x[:, :, :self.degree ** 2]).reshape(batch_size, seq_len, self.degree, self.degree)
+        Q = torch.exp(x[:, :, : self.degree ** 2]).reshape(
+            batch_size, seq_len, self.degree, self.degree
+        )
         R = torch.exp(x[:, :, -1]).reshape(batch_size, seq_len, 1, 1)
 
         return self.initial_P, Q, R
 
 
-def normalize_input(x, y, split) -> (np.ndarray, np.ndarray, [np.ndarray, np.ndarray], [np.ndarray, np.ndarray]):
+def normalize_input(
+    x, y, split
+) -> "(np.ndarray, np.ndarray, [np.ndarray, np.ndarray], [np.ndarray, np.ndarray])":
     if x.ndim == 3:
         split = int(split * x.shape[1])
-        x_stats = x_mean, x_std = np.mean(x[:, :split], 1, keepdims=True), np.std(x[:, :split], 1, keepdims=True)
+        x_stats = x_mean, x_std = (
+            np.mean(x[:, :split], 1, keepdims=True),
+            np.std(x[:, :split], 1, keepdims=True),
+        )
         y_stats = y_mean, y_std = x_mean[:, :, 0, None], x_std[:, :, 0, None]
-
 
     else:
         split = int(split * x.shape[0])
@@ -124,7 +157,7 @@ def scale_outputs(x, y, x_stats, y_stats):
     return x, y
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     total_epochs = 1000
     generated_points = 10000
     max_sampled_points = 1000
@@ -135,7 +168,7 @@ if __name__ == '__main__':
 
     model = DeepKalmanParameters(32, degree)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    loss_fn = nn.GaussianNLLLoss(reduction='mean', eps=1e-6)
+    loss_fn = nn.GaussianNLLLoss(reduction="mean", eps=1e-6)
     # model.cuda()
 
     model.train()
@@ -148,8 +181,12 @@ if __name__ == '__main__':
 
         sampled_points = np.random.randint(10, max_sampled_points, 1)[0]
         for _ in range(batch_size):
-            generate = np.random.choice([generate_cubic_data, generate_exponential_data, generate_sin_data])
-            time, measurement = generate(generated_points, np.random.randint(0, max_removed_points, 1)[0])
+            generate = np.random.choice(
+                [generate_cubic_data, generate_exponential_data, generate_sin_data]
+            )
+            time, measurement = generate(
+                generated_points, np.random.randint(0, max_removed_points, 1)[0]
+            )
             indices = np.random.choice(generated_points, sampled_points, replace=False)
             indices = np.sort(indices)
             time, measurement = time[indices], measurement[indices]
@@ -167,9 +204,14 @@ if __name__ == '__main__':
 
         x_positions = x_trains[:, :, 0, None]
         dts = x_trains[:, :, 1, None]
-        x_positions, y_train, x_stats, y_stats = normalize_input(x_positions, y_trains, stats_split)
+        x_positions, y_train, x_stats, y_stats = normalize_input(
+            x_positions, y_trains, stats_split
+        )
         x_train = np.concatenate([x_positions, dts], axis=2)
-        x_train, y_train = torch.from_numpy(x_train).float(), torch.from_numpy(y_train).float()
+        x_train, y_train = (
+            torch.from_numpy(x_train).float(),
+            torch.from_numpy(y_train).float(),
+        )
 
         initial_P, Q, R = model(x_train)
         kalman_filter = KalmanFilter(initial_P, degree, batch_size=batch_size)
@@ -177,7 +219,9 @@ if __name__ == '__main__':
         pred_means = []
         pred_vars = []
         for i in range(len(y_train[0])):
-            state, P = kalman_filter.update(y_train[:, i], x_train[:, i, 1], R[:, i], Q[:, i])
+            state, P = kalman_filter.update(
+                y_train[:, i], x_train[:, i, 1], R[:, i], Q[:, i]
+            )
             pred_means.append(state[:, 0, 0])
             pred_vars.append(P[:, 0, 0])
         pred_means = torch.stack(pred_means, 1)
@@ -191,15 +235,20 @@ if __name__ == '__main__':
         # loss.backward()
         # optimizer.step()
 
-        print(f'Epoch {epoch} loss: {loss.item()}')
+        # print(f"Epoch {epoch} loss: {loss.item()}")
         if epoch % 100 == 0:
             with torch.no_grad():
                 y_train = y_train.cpu().numpy()[0]
                 pred_means = pred_means.cpu().numpy()[0]
                 pred_stds = pred_stds.cpu().numpy()[0]
-                plt.plot(np.arange(len(pred_means)), y_train, label='pred')
-                plt.fill_between(np.arange(len(pred_means)), pred_means - 2*pred_stds, pred_means + 2*pred_stds, alpha=0.5)
-                plt.scatter(np.arange(len(y_train)), y_train, label='True')
+                plt.plot(np.arange(len(pred_means)), y_train, label="pred")
+                plt.fill_between(
+                    np.arange(len(pred_means)),
+                    pred_means - 2 * pred_stds,
+                    pred_means + 2 * pred_stds,
+                    alpha=0.5,
+                )
+                plt.scatter(np.arange(len(y_train)), y_train, label="True")
                 plt.legend()
                 plt.ylim(-2, 2)
                 plt.show()
